@@ -1448,6 +1448,7 @@ async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+    return SETUP_VALUE
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1554,7 +1555,10 @@ def main():
     settings_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("Settings"), settings_start)],
         states={
-            SETUP_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_value)],
+            SETUP_VALUE: [
+                CallbackQueryHandler(settings_callback, pattern=r"^cfg_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, settings_value),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
@@ -1605,7 +1609,6 @@ def main():
     app.add_handler(settings_conv)
     app.add_handler(MessageHandler(filters.Regex("List of Clients"), list_clients))
     app.add_handler(CallbackQueryHandler(remove_client_callback,   pattern=r"^remove_"))
-    app.add_handler(CallbackQueryHandler(settings_callback,        pattern=r"^cfg_"))
     app.add_handler(CallbackQueryHandler(reminder_confirm_callback, pattern=r"^remind_"))
 
     print("Bot is running... Press Ctrl+C to stop.")

@@ -28,8 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DATA_FILE  = "clients.json"
-CONFIG_FILE = "config.json"
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+DATA_FILE  = os.path.join(DATA_DIR, "clients.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
 DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 DAY_SHORT    = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]

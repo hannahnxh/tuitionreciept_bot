@@ -11,6 +11,7 @@ import os
 import logging
 import calendar
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ConversationHandler,
@@ -31,6 +32,14 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 DATA_FILE  = os.path.join(DATA_DIR, "clients.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+
+TZ = ZoneInfo(os.environ.get("BOT_TIMEZONE", "Asia/Singapore"))
+
+def now_local() -> datetime:
+    return datetime.now(TZ)
+
+def today_local() -> date:
+    return now_local().date()
 
 DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 DAY_SHORT    = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -110,14 +119,14 @@ def schedule_label(client: dict) -> str:
 # ── Reminder job helpers ──────────────────────────────────────────────────────
 
 def _seconds_until_next(weekday: int, time_str: str) -> float:
-    """Seconds from now until 10 min before the next occurrence of weekday+time."""
+    """Seconds from now until 10 min before the next occurrence of weekday+time (local tz)."""
     t = datetime.strptime(time_str, "%H:%M").time()
-    now = datetime.now()
-    target_today = datetime.combine(now.date(), t) - timedelta(minutes=10)
+    now = now_local()
+    target_today = datetime.combine(now.date(), t, tzinfo=TZ) - timedelta(minutes=10)
     days_ahead = (weekday - now.weekday()) % 7
     if days_ahead == 0 and now >= target_today:
         days_ahead = 7
-    target = datetime.combine(now.date() + timedelta(days=days_ahead), t) - timedelta(minutes=10)
+    target = datetime.combine(now.date() + timedelta(days=days_ahead), t, tzinfo=TZ) - timedelta(minutes=10)
     return max((target - now).total_seconds(), 1)
 
 def schedule_reminder_job(app, cid: str, client: dict, chat_id: int):
@@ -132,7 +141,7 @@ def schedule_reminder_job(app, cid: str, client: dict, chat_id: int):
     for job in app.job_queue.get_jobs_by_name(f"reminder_{cid}"):
         job.schedule_removal()
     secs = _seconds_until_next(day, time_str)
-    fires_at = datetime.now() + timedelta(seconds=secs)
+    fires_at = now_local() + timedelta(seconds=secs)
     app.job_queue.run_repeating(
         reminder_job,
         interval=timedelta(weeks=1),
@@ -147,7 +156,7 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     d = context.job.data
     logger.info("Firing reminder for %s (cid=%s)", d["client_name"], d["cid"])
     # session date is ~10 min from now
-    session_date = (datetime.now() + timedelta(minutes=11)).date().isoformat()
+    session_date = (now_local() + timedelta(minutes=11)).date().isoformat()
     buttons = InlineKeyboardMarkup([[
         InlineKeyboardButton("Going ahead", callback_data=f"remind_yes_{d['cid']}_{session_date}"),
         InlineKeyboardButton("Cancelled",   callback_data=f"remind_no_{d['cid']}_{session_date}"),
@@ -182,11 +191,11 @@ async def reminder_confirm_callback(update: Update, _context: ContextTypes.DEFAU
 # ── Weekly summary job ────────────────────────────────────────────────────────
 
 def _seconds_until(weekday: int, time_str: str) -> float:
-    """Seconds from now until the next occurrence of weekday+time."""
+    """Seconds from now until the next occurrence of weekday+time (local tz)."""
     t = datetime.strptime(time_str, "%H:%M").time()
-    now = datetime.now()
+    now = now_local()
     days_ahead = (weekday - now.weekday()) % 7
-    target = datetime.combine(now.date() + timedelta(days=days_ahead), t)
+    target = datetime.combine(now.date() + timedelta(days=days_ahead), t, tzinfo=TZ)
     if target <= now:
         target += timedelta(days=7)
     return max((target - now).total_seconds(), 1)
@@ -206,20 +215,42 @@ def schedule_weekly_summary_job(app, chat_id: int):
         name="weekly_summary",
         data={"chat_id": chat_id},
     )
-    fires_at = datetime.now() + timedelta(seconds=secs)
+    fires_at = now_local() + timedelta(seconds=secs)
     logger.info("Weekly summary scheduled: first fires at %s", fires_at.strftime("%Y-%m-%d %H:%M"))
 
+def _rsc_unpack(entry):
+    """Return (new_iso, time_str) from a rescheduled_dates entry (old str or new dict)."""
+    if isinstance(entry, dict):
+        return entry["date"], entry.get("time")
+    return entry, None  # backwards compat: old plain-string format
+
 def _week_sessions(data: dict, monday: date) -> list:
-    """All sessions (recurring + one-off) falling within monday..monday+6, sorted by date/time."""
+    """All non-cancelled sessions (recurring + rescheduled + one-off) within monday..monday+6, sorted by date/time."""
     sunday = monday + timedelta(days=6)
     entries = []
     for client in data["clients"].values():
-        cancelled = set(client.get("cancelled_dates", []))
+        cancelled_dates   = set(client.get("cancelled_dates", []))
+        rescheduled_dates = client.get("rescheduled_dates", {})
         day = client.get("schedule_day")
         if day is not None:
             d = monday + timedelta(days=day)
-            if d.isoformat() not in cancelled:
+            d_iso = d.isoformat()
+            if d_iso in rescheduled_dates:
+                new_iso, rsc_time = _rsc_unpack(rescheduled_dates[d_iso])
+                new_d = date.fromisoformat(new_iso)
+                if monday <= new_d <= sunday:
+                    entries.append((new_d, rsc_time or client.get("schedule_time") or "",
+                                     client["name"], client.get("schedule_hours")))
+            elif d_iso not in cancelled_dates:
                 entries.append((d, client.get("schedule_time") or "", client["name"], client.get("schedule_hours")))
+        # make-up sessions rescheduled INTO this week from another week
+        for orig_iso, entry in rescheduled_dates.items():
+            new_iso, rsc_time = _rsc_unpack(entry)
+            orig_d = date.fromisoformat(orig_iso)
+            new_d  = date.fromisoformat(new_iso)
+            if monday <= new_d <= sunday and not (monday <= orig_d <= sunday):
+                entries.append((new_d, rsc_time or client.get("schedule_time") or "",
+                                 client["name"], client.get("schedule_hours")))
         for ex in client.get("extra_sessions", []):
             d = date.fromisoformat(ex["date"])
             if monday <= d <= sunday:
@@ -241,7 +272,7 @@ def _week_summary_text(monday: date, entries: list) -> str:
 
 async def weekly_summary_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.data["chat_id"]
-    today   = date.today()
+    today   = today_local()
     monday  = today - timedelta(days=today.weekday())
     entries = _week_sessions(load_data(), monday)
     await context.bot.send_message(
@@ -257,10 +288,121 @@ async def test_weekly_summary(update: Update, _context: ContextTypes.DEFAULT_TYP
     if not chat_id:
         await update.message.reply_text("No chat_id saved — send /start first.")
         return
-    today   = date.today()
+    today   = today_local()
     monday  = today - timedelta(days=today.weekday())
     entries = _week_sessions(load_data(), monday)
     await update.message.reply_text(_week_summary_text(monday, entries), parse_mode="Markdown")
+
+
+# ── Monthly earnings summary job ──────────────────────────────────────────────
+
+def _seconds_until_month_start(time_str: str) -> float:
+    """Seconds from now until the 1st of next month at time_str (local tz)."""
+    t = datetime.strptime(time_str, "%H:%M").time()
+    now = now_local()
+    if now.month == 12:
+        target_date = date(now.year + 1, 1, 1)
+    else:
+        target_date = date(now.year, now.month + 1, 1)
+    target = datetime.combine(target_date, t, tzinfo=TZ)
+    return max((target - now).total_seconds(), 1)
+
+def schedule_monthly_summary_job(app, chat_id: int):
+    """Register (or replace) the 1st-of-month 8am earnings summary for the month just ended."""
+    if app.job_queue is None:
+        logger.warning("JobQueue not available — install python-telegram-bot[job-queue]")
+        return
+    for job in app.job_queue.get_jobs_by_name("monthly_summary"):
+        job.schedule_removal()
+    secs = _seconds_until_month_start("08:00")
+    app.job_queue.run_once(
+        monthly_summary_job,
+        when=secs,
+        name="monthly_summary",
+        data={"chat_id": chat_id},
+    )
+    fires_at = now_local() + timedelta(seconds=secs)
+    logger.info("Monthly summary scheduled: first fires at %s", fires_at.strftime("%Y-%m-%d %H:%M"))
+
+def _month_sessions(client: dict, year: int, month: int) -> list:
+    """Non-cancelled sessions (recurring + rescheduled + one-off) for a client within a given month."""
+    cancelled_dates   = set(client.get("cancelled_dates", []))
+    rescheduled_dates = client.get("rescheduled_dates", {})
+    month_start = date(year, month, 1)
+    month_end   = date(year, month, calendar.monthrange(year, month)[1])
+
+    sessions = []
+    if client.get("schedule_day") is not None:
+        for d in get_weekday_dates_in_month(year, month, client["schedule_day"]):
+            d_iso = d.isoformat()
+            if d_iso in rescheduled_dates:
+                new_iso, _ = _rsc_unpack(rescheduled_dates[d_iso])
+                new_d = date.fromisoformat(new_iso)
+                if month_start <= new_d <= month_end:
+                    sessions.append({"date_obj": new_iso, "hours": client["schedule_hours"]})
+            elif d_iso not in cancelled_dates:
+                sessions.append({"date_obj": d_iso, "hours": client["schedule_hours"]})
+
+    for orig_iso, entry in rescheduled_dates.items():
+        new_iso, _ = _rsc_unpack(entry)
+        orig_d = date.fromisoformat(orig_iso)
+        new_d  = date.fromisoformat(new_iso)
+        if month_start <= new_d <= month_end and not (month_start <= orig_d <= month_end):
+            sessions.append({"date_obj": new_iso, "hours": client["schedule_hours"]})
+
+    for ex in client.get("extra_sessions", []):
+        ex_d = date.fromisoformat(ex["date"])
+        if month_start <= ex_d <= month_end:
+            sessions.append({"date_obj": ex["date"], "hours": ex["hours"]})
+
+    return sessions
+
+def _month_summary_text(data: dict, year: int, month: int) -> str:
+    month_label = date(year, month, 1).strftime("%B %Y")
+    header = f"*Monthly Summary — {month_label}*"
+    total_hours  = 0.0
+    total_amount = 0.0
+    client_lines = []
+    for client in data["clients"].values():
+        sessions = _month_sessions(client, year, month)
+        if not sessions:
+            continue
+        hours  = sum(s["hours"] for s in sessions)
+        rate   = client.get("rate", 0)
+        amount = hours * rate
+        total_hours  += hours
+        total_amount += amount
+        client_lines.append(
+            f"• {client['name']}: {len(sessions)} session{'s' if len(sessions) != 1 else ''}, "
+            f"{hours} hr{'s' if hours != 1 else ''} — ${amount:.2f}"
+        )
+    if not client_lines:
+        return f"{header}\n\nNo tuition lessons conducted this month."
+    body = "\n".join(client_lines)
+    return f"{header}\n\n{body}\n\n*Total Hours:* {total_hours} hrs\n*Total Earned: ${total_amount:.2f}*"
+
+async def monthly_summary_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data["chat_id"]
+    today   = today_local()
+    if today.month == 1:
+        year, month = today.year - 1, 12
+    else:
+        year, month = today.year, today.month - 1
+    text = _month_summary_text(load_data(), year, month)
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    # reschedule for the following month
+    schedule_monthly_summary_job(context.application, chat_id)
+
+async def test_monthly_summary(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """Send the earnings summary for the current month so far, for testing."""
+    cfg     = load_config()
+    chat_id = cfg.get("chat_id")
+    if not chat_id:
+        await update.message.reply_text("No chat_id saved — send /start first.")
+        return
+    today = today_local()
+    text  = _month_summary_text(load_data(), today.year, today.month)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -279,6 +421,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config["chat_id"] = update.effective_chat.id
     save_config(config)
     schedule_weekly_summary_job(context.application, update.effective_chat.id)
+    schedule_monthly_summary_job(context.application, update.effective_chat.id)
     tutor = config.get("tutor_name", "")
     greeting = f"Hello, *{tutor}*! \n\n" if tutor else "Welcome to your *Tuition Receipt Bot*! \n\n"
     await update.message.reply_text(
@@ -1134,7 +1277,7 @@ def build_receipt(receipt_data: dict, config: dict) -> str:
     lines.append(f"*Total Amount: ${total_amount:.2f}*")
     if payment_info:
         lines.append(f"\n*Payment:* {payment_info}")
-    lines.append(f"\n_Thank you! Generated {datetime.now().strftime('%d %b %Y')}_")
+    lines.append(f"\n_Thank you! Generated {now_local().strftime('%d %b %Y')}_")
     return "\n".join(lines)
 
 def build_receipt_plain(receipt_data: dict, config: dict) -> str:
@@ -1169,7 +1312,7 @@ def build_receipt_plain(receipt_data: dict, config: dict) -> str:
     ]
     if payment_info:
         lines += ["", f"Payment : {payment_info}"]
-    lines += [sep, "", f"Thank you! Generated: {datetime.now().strftime('%d %b %Y')}"]
+    lines += [sep, "", f"Thank you! Generated: {now_local().strftime('%d %b %Y')}"]
     return "\n".join(lines)
 
 
@@ -1285,12 +1428,12 @@ async def reschedule_new_time(update: Update, context: ContextTypes.DEFAULT_TYPE
     cfg     = load_config()
     chat_id = cfg.get("chat_id")
     if time_str and chat_id and context.application.job_queue:
-        session_dt  = datetime.combine(new_d, datetime.strptime(time_str, "%H:%M").time())
+        session_dt  = datetime.combine(new_d, datetime.strptime(time_str, "%H:%M").time(), tzinfo=TZ)
         reminder_dt = session_dt - timedelta(minutes=10)
-        if reminder_dt > datetime.now():
+        if reminder_dt > now_local():
             context.application.job_queue.run_once(
                 reminder_job,
-                when=(reminder_dt - datetime.now()).total_seconds(),
+                when=(reminder_dt - now_local()).total_seconds(),
                 name=f"reminder_once_{cid}_{new_iso}",
                 data={"cid": cid, "chat_id": chat_id, "client_name": client["name"], "time": time_str},
             )
@@ -1404,12 +1547,12 @@ async def addsess_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg     = load_config()
     chat_id = cfg.get("chat_id")
     if time_str and chat_id and context.application.job_queue:
-        session_dt  = datetime.combine(date.fromisoformat(d_iso), datetime.strptime(time_str, "%H:%M").time())
+        session_dt  = datetime.combine(date.fromisoformat(d_iso), datetime.strptime(time_str, "%H:%M").time(), tzinfo=TZ)
         reminder_dt = session_dt - timedelta(minutes=10)
-        if reminder_dt > datetime.now():
+        if reminder_dt > now_local():
             context.application.job_queue.run_once(
                 reminder_job,
-                when=(reminder_dt - datetime.now()).total_seconds(),
+                when=(reminder_dt - now_local()).total_seconds(),
                 name=f"reminder_once_{cid}_{d_iso}",
                 data={"cid": cid, "chat_id": chat_id, "client_name": client["name"], "time": time_str},
             )
@@ -1433,7 +1576,7 @@ def _next_n_sessions(client: dict, n: int = 8) -> list[date]:
     day = client.get("schedule_day")
     if day is None:
         return []
-    today = date.today()
+    today = today_local()
     results = []
     d = today + timedelta(days=(day - today.weekday()) % 7)
     while len(results) < n:
@@ -1579,6 +1722,7 @@ def main():
         for cid, client in load_data()["clients"].items():
             schedule_reminder_job(app, cid, client, chat_id)
         schedule_weekly_summary_job(app, chat_id)
+        schedule_monthly_summary_job(app, chat_id)
 
     # ── Add Client ────────────────────────────────────────────────────────────
     add_conv = ConversationHandler(
@@ -1687,6 +1831,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testreminder", test_reminder))
     app.add_handler(CommandHandler("testsummary", test_weekly_summary))
+    app.add_handler(CommandHandler("testmonthsummary", test_monthly_summary))
     app.add_handler(add_conv)
     app.add_handler(edit_conv)
     app.add_handler(receipt_conv)

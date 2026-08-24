@@ -1,0 +1,5 @@
+nohup.out
+.env
+bot.log
+clients.json
+config.json

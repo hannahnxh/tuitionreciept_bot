@@ -179,6 +179,90 @@ async def reminder_confirm_callback(update: Update, _context: ContextTypes.DEFAU
         await query.edit_message_text(f"Session with *{name}* on {session_date} marked as cancelled.", parse_mode="Markdown")
 
 
+# ── Weekly summary job ────────────────────────────────────────────────────────
+
+def _seconds_until(weekday: int, time_str: str) -> float:
+    """Seconds from now until the next occurrence of weekday+time."""
+    t = datetime.strptime(time_str, "%H:%M").time()
+    now = datetime.now()
+    days_ahead = (weekday - now.weekday()) % 7
+    target = datetime.combine(now.date() + timedelta(days=days_ahead), t)
+    if target <= now:
+        target += timedelta(days=7)
+    return max((target - now).total_seconds(), 1)
+
+def schedule_weekly_summary_job(app, chat_id: int):
+    """Register (or replace) the Monday 8am weekly summary reminder."""
+    if app.job_queue is None:
+        logger.warning("JobQueue not available — install python-telegram-bot[job-queue]")
+        return
+    for job in app.job_queue.get_jobs_by_name("weekly_summary"):
+        job.schedule_removal()
+    secs = _seconds_until(0, "08:00")  # 0 = Monday
+    app.job_queue.run_repeating(
+        weekly_summary_job,
+        interval=timedelta(weeks=1),
+        first=secs,
+        name="weekly_summary",
+        data={"chat_id": chat_id},
+    )
+    fires_at = datetime.now() + timedelta(seconds=secs)
+    logger.info("Weekly summary scheduled: first fires at %s", fires_at.strftime("%Y-%m-%d %H:%M"))
+
+def _week_sessions(data: dict, monday: date) -> list:
+    """All sessions (recurring + one-off) falling within monday..monday+6, sorted by date/time."""
+    sunday = monday + timedelta(days=6)
+    entries = []
+    for client in data["clients"].values():
+        cancelled = set(client.get("cancelled_dates", []))
+        day = client.get("schedule_day")
+        if day is not None:
+            d = monday + timedelta(days=day)
+            if d.isoformat() not in cancelled:
+                entries.append((d, client.get("schedule_time") or "", client["name"], client.get("schedule_hours")))
+        for ex in client.get("extra_sessions", []):
+            d = date.fromisoformat(ex["date"])
+            if monday <= d <= sunday:
+                entries.append((d, ex.get("time") or "", client["name"], ex.get("hours")))
+    entries.sort(key=lambda e: (e[0], e[1]))
+    return entries
+
+def _week_summary_text(monday: date, entries: list) -> str:
+    sunday = monday + timedelta(days=6)
+    header = f"*Weekly Summary* ({monday.strftime('%d %b')} – {sunday.strftime('%d %b')})"
+    if not entries:
+        return f"{header}\n\nNo tuition lessons scheduled this week."
+    lines = [header, ""]
+    for d, t, name, hrs in entries:
+        time_part = f" at {t}" if t else ""
+        hrs_part  = f", {hrs} hr{'s' if hrs != 1 else ''}" if hrs else ""
+        lines.append(f"• {DAY_SHORT[d.weekday()]} {d.strftime('%d %b')}{time_part} — {name}{hrs_part}")
+    return "\n".join(lines)
+
+async def weekly_summary_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data["chat_id"]
+    today   = date.today()
+    monday  = today - timedelta(days=today.weekday())
+    entries = _week_sessions(load_data(), monday)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=_week_summary_text(monday, entries),
+        parse_mode="Markdown",
+    )
+
+async def test_weekly_summary(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """Send the weekly summary immediately, for testing."""
+    cfg     = load_config()
+    chat_id = cfg.get("chat_id")
+    if not chat_id:
+        await update.message.reply_text("No chat_id saved — send /start first.")
+        return
+    today   = date.today()
+    monday  = today - timedelta(days=today.weekday())
+    entries = _week_sessions(load_data(), monday)
+    await update.message.reply_text(_week_summary_text(monday, entries), parse_mode="Markdown")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN MENU
 # ══════════════════════════════════════════════════════════════════════════════
@@ -194,6 +278,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["chat_id"] = update.effective_chat.id
     save_config(config)
+    schedule_weekly_summary_job(context.application, update.effective_chat.id)
     tutor = config.get("tutor_name", "")
     greeting = f"Hello, *{tutor}*! \n\n" if tutor else "Welcome to your *Tuition Receipt Bot*! \n\n"
     await update.message.reply_text(
@@ -1493,6 +1578,7 @@ def main():
     if chat_id:
         for cid, client in load_data()["clients"].items():
             schedule_reminder_job(app, cid, client, chat_id)
+        schedule_weekly_summary_job(app, chat_id)
 
     # ── Add Client ────────────────────────────────────────────────────────────
     add_conv = ConversationHandler(
@@ -1600,6 +1686,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testreminder", test_reminder))
+    app.add_handler(CommandHandler("testsummary", test_weekly_summary))
     app.add_handler(add_conv)
     app.add_handler(edit_conv)
     app.add_handler(receipt_conv)

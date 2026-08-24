@@ -3,3 +3,7 @@ nohup.out
 bot.log
 clients.json
 config.json
+.web_password
+.web_secret
+venv/
+__pycache__/

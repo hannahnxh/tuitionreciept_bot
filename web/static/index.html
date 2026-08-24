@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Tuition Receipt Bot</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <div id="login-screen" class="screen">
+    <form id="login-form" class="login-card">
+      <div class="login-icon">$</div>
+      <h1>Tuition Receipt Bot</h1>
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required />
+      <button type="submit">Log in</button>
+      <p id="login-error" class="error-text"></p>
+    </form>
+  </div>
+
+  <div id="app-screen" class="screen hidden">
+    <header class="topbar">
+      <span class="brand">Tuition Receipt Bot</span>
+      <button id="logout-btn" class="link-btn">Log out</button>
+    </header>
+
+    <main id="views">
+      <!-- Dashboard -->
+      <section id="view-dashboard" class="view">
+        <div class="kpi-row">
+          <div class="stat-tile">
+            <span class="stat-icon stat-icon-earnings" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1.1 1.12-2 2.5-2s2.5.9 2.5 2-1.12 2-2.5 2-2.5.9-2.5 2 1.12 2 2.5 2 2.5-.9 2.5-2"/></svg>
+            </span>
+            <div class="stat-value" id="stat-earnings">–</div>
+            <div class="stat-label">Total earnings</div>
+          </div>
+          <div class="stat-tile">
+            <span class="stat-icon stat-icon-hours" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+            </span>
+            <div class="stat-value" id="stat-hours">–</div>
+            <div class="stat-label">Hours taught</div>
+          </div>
+          <div class="stat-tile">
+            <span class="stat-icon stat-icon-students" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15.5 15.2c2.5.3 4.5 2.1 4.5 4.8"/></svg>
+            </span>
+            <div class="stat-value" id="stat-students">–</div>
+            <div class="stat-label">Active students</div>
+          </div>
+        </div>
+        <p class="hint" id="stat-since-hint"></p>
+
+        <h2>This Week</h2>
+        <div id="week-card" class="card"></div>
+
+        <h2>This Month</h2>
+        <div class="month-nav">
+          <button id="month-prev" class="icon-btn">&larr;</button>
+          <span id="month-label"></span>
+          <button id="month-next" class="icon-btn">&rarr;</button>
+        </div>
+        <div id="month-card" class="card"></div>
+      </section>
+
+      <!-- Clients -->
+      <section id="view-clients" class="view hidden">
+        <div class="section-header">
+          <h2>Clients</h2>
+          <button id="add-client-btn" class="primary-btn">+ Add</button>
+        </div>
+        <p class="hint">Reminders for changes made here sync into Telegram after the bot's next restart.</p>
+        <div id="clients-list"></div>
+      </section>
+
+      <!-- Receipt -->
+      <section id="view-receipt" class="view hidden">
+        <h2>Generate Receipt</h2>
+        <div class="card form-card">
+          <label>Client
+            <select id="receipt-client"></select>
+          </label>
+          <label>Month
+            <input type="month" id="receipt-month" />
+          </label>
+          <button id="receipt-generate-btn" class="primary-btn">Generate</button>
+        </div>
+        <div id="receipt-output-wrap" class="card hidden">
+          <pre id="receipt-output"></pre>
+          <button id="receipt-copy-btn" class="primary-btn">Copy to clipboard</button>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section id="view-settings" class="view hidden">
+        <h2>Settings</h2>
+        <form id="settings-form" class="card form-card">
+          <label>Tutor / business name
+            <input type="text" id="settings-tutor" />
+          </label>
+          <label>Default payment info
+            <textarea id="settings-payment" rows="3"></textarea>
+          </label>
+          <label>Tracking since
+            <input type="month" id="settings-since" />
+          </label>
+          <p class="hint">"Total earnings" and "Hours taught" on the Dashboard are summed from this month onward. There's no historical log to reconstruct further back, so set this to whenever you started using the bot for accurate lifetime totals.</p>
+          <button type="submit" class="primary-btn">Save</button>
+          <p id="settings-saved" class="hint hidden">Saved!</p>
+        </form>
+      </section>
+    </main>
+
+    <nav class="tabbar">
+      <button class="tab-btn active" data-view="dashboard">Dashboard</button>
+      <button class="tab-btn" data-view="clients">Clients</button>
+      <button class="tab-btn" data-view="receipt">Receipt</button>
+      <button class="tab-btn" data-view="settings">Settings</button>
+    </nav>
+  </div>
+
+  <!-- Client add/edit modal -->
+  <div id="client-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="client-modal-title">Add Client</h3>
+      <form id="client-form">
+        <label>Name
+          <input type="text" id="c-name" required />
+        </label>
+        <label>Parent name
+          <input type="text" id="c-parent" />
+        </label>
+        <label>Contact
+          <input type="text" id="c-contact" />
+        </label>
+        <label>Location
+          <input type="text" id="c-location" />
+        </label>
+        <label>Rate ($/hr)
+          <input type="number" id="c-rate" step="0.01" min="0" required />
+        </label>
+        <label>Recurring day
+          <select id="c-day">
+            <option value="">None</option>
+            <option value="0">Monday</option>
+            <option value="1">Tuesday</option>
+            <option value="2">Wednesday</option>
+            <option value="3">Thursday</option>
+            <option value="4">Friday</option>
+            <option value="5">Saturday</option>
+            <option value="6">Sunday</option>
+          </select>
+        </label>
+        <label>Hours per session
+          <input type="number" id="c-hours" step="0.25" min="0" />
+        </label>
+        <label>Session time
+          <input type="time" id="c-time" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="client-cancel-btn" class="secondary-btn">Cancel</button>
+          <button type="submit" class="primary-btn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Session editor modal -->
+  <div id="sessions-modal" class="modal hidden">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-header">
+        <h3 id="sessions-modal-title">Sessions</h3>
+        <button type="button" id="sessions-close-btn" class="icon-btn" aria-label="Close">&times;</button>
+      </div>
+      <div class="month-nav">
+        <button id="sessions-month-prev" class="icon-btn">&larr;</button>
+        <span id="sessions-month-label"></span>
+        <button id="sessions-month-next" class="icon-btn">&rarr;</button>
+      </div>
+      <div id="sessions-list"></div>
+
+      <h4>Add a one-off session</h4>
+      <form id="add-session-form" class="inline-form">
+        <input type="date" id="as-date" required />
+        <input type="time" id="as-time" placeholder="Time" />
+        <input type="number" id="as-hours" step="0.25" min="0" placeholder="Hours" required />
+        <button type="submit" class="primary-btn">Add</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Reschedule modal -->
+  <div id="reschedule-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Reschedule session</h3>
+      <p class="hint" id="reschedule-orig-label"></p>
+      <form id="reschedule-form">
+        <label>New date
+          <input type="date" id="rsc-new-date" required />
+        </label>
+        <label>New time
+          <input type="time" id="rsc-new-time" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="reschedule-cancel-btn" class="secondary-btn">Cancel</button>
+          <button type="submit" class="primary-btn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

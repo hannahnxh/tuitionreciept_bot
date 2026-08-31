@@ -114,11 +114,23 @@ def me(request: Request):
 
 # ── Summaries ──────────────────────────────────────────────────────────────
 
+def _month_sessions_active(client: dict, year: int, month: int) -> list:
+    """Like bot._month_sessions, but stops counting sessions after the
+    client's retirement date — past months are unaffected."""
+    sessions = bot._month_sessions(client, year, month)
+    retired = client.get("retired_date")
+    if not retired:
+        return sessions
+    return [s for s in sessions if s["date_obj"] <= retired]
+
+
 @app.get("/api/summary/week", dependencies=[Depends(require_auth)])
 def summary_week():
     today = bot.today_local()
     monday = today - bot.timedelta(days=today.weekday())
-    entries = bot._week_sessions(bot.load_data(), monday)
+    data = bot.load_data()
+    active_clients = {cid: c for cid, c in data["clients"].items() if not c.get("retired_date")}
+    entries = bot._week_sessions({"clients": active_clients}, monday)
     return {
         "monday": monday.isoformat(),
         "sunday": (monday + bot.timedelta(days=6)).isoformat(),
@@ -139,7 +151,7 @@ def summary_month(year: Optional[int] = None, month: Optional[int] = None):
     total_amount = 0.0
     clients_out = []
     for cid, client in data["clients"].items():
-        sessions = bot._month_sessions(client, year, month)
+        sessions = _month_sessions_active(client, year, month)
         if not sessions:
             continue
         hours = sum(s["hours"] for s in sessions)
@@ -175,7 +187,7 @@ def summary_alltime():
     y, m = since.year, since.month
     while (y, m) <= (today.year, today.month):
         for client in data["clients"].values():
-            sessions = bot._month_sessions(client, y, m)
+            sessions = _month_sessions_active(client, y, m)
             hours = sum(s["hours"] for s in sessions)
             total_hours += hours
             total_amount += hours * client.get("rate", 0)
@@ -185,7 +197,7 @@ def summary_alltime():
         "since": since.isoformat(),
         "total_hours": total_hours,
         "total_amount": total_amount,
-        "active_students": len(data["clients"]),
+        "active_students": len([c for c in data["clients"].values() if not c.get("retired_date")]),
     }
 
 
@@ -233,7 +245,7 @@ def update_client(cid: str, body: ClientIn):
     existing = data["clients"][cid]
     updated = body.model_dump()
     # preserve fields the web form doesn't manage
-    for key in ("cancelled_dates", "rescheduled_dates", "extra_sessions"):
+    for key in ("cancelled_dates", "rescheduled_dates", "extra_sessions", "retired_date"):
         if key in existing:
             updated[key] = existing[key]
     data["clients"][cid] = updated
@@ -249,6 +261,27 @@ def delete_client(cid: str):
     del data["clients"][cid]
     bot.save_data(data)
     return {"ok": True}
+
+
+@app.post("/api/clients/{cid}/retire", dependencies=[Depends(require_auth)])
+def retire_client(cid: str):
+    """Mark a client retired as of today. Past sessions/receipts/earnings are
+    untouched — they just stop appearing in current/future views (dashboard,
+    calendar feed, active-student count) going forward. Reversible."""
+    data = bot.load_data()
+    client = _get_client_or_404(data, cid)
+    client["retired_date"] = bot.today_local().isoformat()
+    bot.save_data(data)
+    return {"cid": cid, **client}
+
+
+@app.post("/api/clients/{cid}/reactivate", dependencies=[Depends(require_auth)])
+def reactivate_client(cid: str):
+    data = bot.load_data()
+    client = _get_client_or_404(data, cid)
+    client.pop("retired_date", None)
+    bot.save_data(data)
+    return {"cid": cid, **client}
 
 
 # ── Session editing (cancel / reschedule / one-off sessions) ─────────────
@@ -308,6 +341,10 @@ def _client_month_detail(client: dict, year: int, month: int) -> list:
                 "date": ex["date"], "hours": ex["hours"], "time": ex.get("time"),
                 "kind": "extra", "status": "active",
             })
+
+    retired = client.get("retired_date")
+    if retired:
+        rows = [r for r in rows if r["date"] <= retired]
 
     rows.sort(key=lambda r: r["date"])
     return rows
@@ -404,7 +441,7 @@ def receipt(cid: str, year: int, month: int):
     if cid not in data["clients"]:
         raise HTTPException(status_code=404, detail="Client not found")
     client = data["clients"][cid]
-    raw_sessions = bot._month_sessions(client, year, month)
+    raw_sessions = _month_sessions_active(client, year, month)
     sessions = [
         {
             "date": bot.date.fromisoformat(s["date_obj"]).strftime("%d %b %Y"),

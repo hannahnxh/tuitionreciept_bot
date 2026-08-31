@@ -177,6 +177,30 @@ document.getElementById("month-next").addEventListener("click", () => {
 
 // ── Clients ──────────────────────────────────────────────────────────────
 
+function clientCardHtml(c) {
+  const retired = !!c.retired_date;
+  const statusActions = retired
+    ? `<button class="secondary-btn" data-reactivate="${c.cid}">Reactivate</button>`
+    : `<button class="secondary-btn" data-retire="${c.cid}">Retire</button>`;
+  return `
+    <div class="client-card${retired ? " client-card-retired" : ""}">
+      <div class="client-card-top">
+        <div>
+          <div class="client-name">${c.name}${c.subject ? ` · ${c.subject}` : ""}</div>
+          <div class="client-sub">${retired ? `Retired ${fmtDate(c.retired_date)}` : c.schedule_label}</div>
+        </div>
+        <div class="client-rate">$${Number(c.rate).toFixed(2)}/hr</div>
+      </div>
+      <div class="client-actions">
+        <button class="secondary-btn" data-sessions="${c.cid}">Sessions</button>
+        <button class="secondary-btn" data-edit="${c.cid}">Edit</button>
+        ${statusActions}
+        <button class="danger-btn" data-delete="${c.cid}">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
 async function loadClients() {
   state.clients = await get("/api/clients");
   const listEl = document.getElementById("clients-list");
@@ -184,22 +208,17 @@ async function loadClients() {
     listEl.innerHTML = `<p class="empty-text">No clients yet.</p>`;
     return;
   }
-  listEl.innerHTML = state.clients.map((c) => `
-    <div class="client-card">
-      <div class="client-card-top">
-        <div>
-          <div class="client-name">${c.name}${c.subject ? ` · ${c.subject}` : ""}</div>
-          <div class="client-sub">${c.schedule_label}</div>
-        </div>
-        <div class="client-rate">$${Number(c.rate).toFixed(2)}/hr</div>
-      </div>
-      <div class="client-actions">
-        <button class="secondary-btn" data-sessions="${c.cid}">Sessions</button>
-        <button class="secondary-btn" data-edit="${c.cid}">Edit</button>
-        <button class="danger-btn" data-delete="${c.cid}">Delete</button>
-      </div>
-    </div>
-  `).join("");
+
+  const active = state.clients.filter((c) => !c.retired_date);
+  const retired = state.clients.filter((c) => c.retired_date);
+
+  let html = active.length
+    ? active.map(clientCardHtml).join("")
+    : `<p class="empty-text">No active clients.</p>`;
+  if (retired.length) {
+    html += `<h2>Retired</h2>` + retired.map(clientCardHtml).join("");
+  }
+  listEl.innerHTML = html;
 
   listEl.querySelectorAll("[data-edit]").forEach((btn) =>
     btn.addEventListener("click", () => openClientModal(btn.dataset.edit))
@@ -210,12 +229,30 @@ async function loadClients() {
   listEl.querySelectorAll("[data-sessions]").forEach((btn) =>
     btn.addEventListener("click", () => openSessionsModal(btn.dataset.sessions))
   );
+  listEl.querySelectorAll("[data-retire]").forEach((btn) =>
+    btn.addEventListener("click", () => retireClient(btn.dataset.retire))
+  );
+  listEl.querySelectorAll("[data-reactivate]").forEach((btn) =>
+    btn.addEventListener("click", () => reactivateClient(btn.dataset.reactivate))
+  );
 }
 
 async function deleteClient(cid) {
   const client = state.clients.find((c) => c.cid === cid);
   if (!confirm(`Delete ${client ? client.name : "this client"}? This can't be undone.`)) return;
   await del(`/api/clients/${cid}`);
+  loadClients();
+}
+
+async function retireClient(cid) {
+  const client = state.clients.find((c) => c.cid === cid);
+  if (!confirm(`Retire ${client ? client.name : "this client"}? They'll stop appearing in dashboards and the calendar feed, but past sessions and receipts stay intact. You can reactivate them later.`)) return;
+  await post(`/api/clients/${cid}/retire`, {});
+  loadClients();
+}
+
+async function reactivateClient(cid) {
+  await post(`/api/clients/${cid}/reactivate`, {});
   loadClients();
 }
 

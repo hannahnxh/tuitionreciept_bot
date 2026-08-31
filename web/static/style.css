@@ -284,6 +284,8 @@ html, body {
   margin-bottom: 10px;
 }
 
+.client-card-retired { opacity: 0.6; }
+
 .client-card-top {
   display: flex;
   justify-content: space-between;

@@ -476,7 +476,24 @@ async function loadSettings() {
   document.getElementById("settings-payment").value = cfg.payment_info || "";
   document.getElementById("settings-since").value = (cfg.tracking_since || "").slice(0, 7); // "YYYY-MM"
   document.getElementById("settings-saved").classList.add("hidden");
+
+  const { path } = await get("/api/settings/calendar-url");
+  document.getElementById("calendar-url").value = `${location.origin}${path}`;
 }
+
+document.getElementById("calendar-copy-btn").addEventListener("click", async () => {
+  const input = document.getElementById("calendar-url");
+  try {
+    await navigator.clipboard.writeText(input.value);
+  } catch {
+    input.select();
+    document.execCommand("copy");
+  }
+  const btn = document.getElementById("calendar-copy-btn");
+  const original = btn.textContent;
+  btn.textContent = "Copied!";
+  setTimeout(() => (btn.textContent = original), 1500);
+});
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();

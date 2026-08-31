@@ -12,6 +12,7 @@ only the running bot process holds the live job queue.
 import os
 import sys
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +49,9 @@ WEB_PASSWORD = os.environ.get("WEB_PASSWORD") or _get_or_create_secret(
 )
 WEB_SECRET_KEY = os.environ.get("WEB_SECRET_KEY") or _get_or_create_secret(
     ".web_secret", lambda: secrets.token_hex(32)
+)
+CALENDAR_TOKEN = os.environ.get("CALENDAR_TOKEN") or _get_or_create_secret(
+    ".calendar_token", lambda: secrets.token_urlsafe(24)
 )
 
 if not os.environ.get("WEB_PASSWORD"):
@@ -448,6 +452,87 @@ def save_settings(body: SettingsIn):
         cfg["tracking_since"] = body.tracking_since
     bot.save_config(cfg)
     return {"ok": True}
+
+
+@app.get("/api/settings/calendar-url", dependencies=[Depends(require_auth)])
+def get_calendar_url():
+    return {"path": f"/calendar/{CALENDAR_TOKEN}.ics"}
+
+
+# ── Calendar feed (read-only, one-way: app → calendar app) ───────────────
+# Subscribed calendar apps fetch this URL directly (no cookies), so it's
+# authenticated by an unguessable token in the path instead of the login
+# session. Regenerated fresh on every request from current client data.
+
+def _month_range(months_back: int, months_forward: int):
+    today = bot.today_local()
+    y, m = today.year, today.month
+    for _ in range(months_back):
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    total = months_back + months_forward + 1
+    for _ in range(total):
+        yield y, m
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+
+def _build_calendar_ics() -> bytes:
+    import icalendar
+
+    cal = icalendar.Calendar()
+    cal.add("prodid", "-//Tuition Receipt Bot//tuition-schedule//EN")
+    cal.add("version", "2.0")
+    cal.add("calscale", "GREGORIAN")
+    cal.add("x-wr-calname", "Tuition Schedule")
+    cal.add("refresh-interval;value=duration", "PT4H")
+
+    data = bot.load_data()
+    seen = set()  # (cid, date) dedupe across the overlapping month windows
+
+    for cid, client in data["clients"].items():
+        for year, month in _month_range(months_back=3, months_forward=12):
+            for row in _client_month_detail(client, year, month):
+                if row["status"] not in ("active", "rescheduled_in"):
+                    continue  # skip cancelled / moved-away rows entirely
+                key = (cid, row["date"], row["kind"])
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                d = bot.date.fromisoformat(row["date"])
+                hours = row.get("hours") or 1
+                time_str = row.get("time")
+
+                event = icalendar.Event()
+                event.add("uid", f"{cid}-{row['date']}-{row['kind']}@tuitionbot")
+                event.add("summary", f"Tuition: {client['name']}")
+                event.add("dtstamp", datetime.now(timezone.utc))
+
+                if time_str:
+                    t = datetime.strptime(time_str, "%H:%M").time()
+                    start_local = datetime.combine(d, t, tzinfo=bot.TZ)
+                    event.add("dtstart", start_local.astimezone(timezone.utc))
+                    event.add("duration", bot.timedelta(hours=hours))
+                else:
+                    event.add("dtstart", d)  # all-day event
+                    event.add("duration", bot.timedelta(days=1))
+
+                desc_lines = [f"Rate: ${client.get('rate', 0):.2f}/hr", f"Hours: {hours}"]
+                if row["status"] == "rescheduled_in":
+                    desc_lines.append(f"Makeup for {row['orig_date']}")
+                if row["kind"] == "extra":
+                    desc_lines.append("One-off session")
+                event.add("description", "\n".join(desc_lines))
+
+                cal.add_component(event)
+
+    return cal.to_ical()
+
+
+@app.get("/calendar/{token}.ics")
+def calendar_feed(token: str):
+    if not secrets.compare_digest(token, CALENDAR_TOKEN):
+        raise HTTPException(status_code=404)
+    return Response(content=_build_calendar_ics(), media_type="text/calendar; charset=utf-8")
 
 
 # ── Static frontend ────────────────────────────────────────────────────────

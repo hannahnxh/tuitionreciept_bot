@@ -188,7 +188,7 @@ async function loadClients() {
     <div class="client-card">
       <div class="client-card-top">
         <div>
-          <div class="client-name">${c.name}</div>
+          <div class="client-name">${c.name}${c.subject ? ` · ${c.subject}` : ""}</div>
           <div class="client-sub">${c.schedule_label}</div>
         </div>
         <div class="client-rate">$${Number(c.rate).toFixed(2)}/hr</div>
@@ -230,6 +230,7 @@ function openClientModal(cid) {
     const c = state.clients.find((x) => x.cid === cid);
     title.textContent = "Edit Client";
     document.getElementById("c-name").value = c.name || "";
+    document.getElementById("c-subject").value = c.subject || "";
     document.getElementById("c-parent").value = c.parent_name || "";
     document.getElementById("c-contact").value = c.contact || "";
     document.getElementById("c-location").value = c.location || "";
@@ -258,6 +259,7 @@ document.getElementById("client-form").addEventListener("submit", async (e) => {
   const timeVal = document.getElementById("c-time").value;
   const payload = {
     name: document.getElementById("c-name").value.trim(),
+    subject: document.getElementById("c-subject").value.trim(),
     parent_name: document.getElementById("c-parent").value.trim(),
     contact: document.getElementById("c-contact").value.trim(),
     location: document.getElementById("c-location").value.trim(),

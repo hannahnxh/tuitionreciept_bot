@@ -193,6 +193,7 @@ def summary_alltime():
 
 class ClientIn(BaseModel):
     name: str
+    subject: str = ""
     parent_name: str = ""
     contact: str = ""
     location: str = ""
@@ -502,10 +503,17 @@ def _build_calendar_ics() -> bytes:
                 hours = row.get("hours") or 1
                 time_str = row.get("time")
 
+                summary_parts = ["Tuition"]
+                if client.get("subject"):
+                    summary_parts.append(client["subject"])
+                summary_parts.append(client["name"])
+
                 event = icalendar.Event()
                 event.add("uid", f"{cid}-{row['date']}-{row['kind']}@tuitionbot")
-                event.add("summary", f"Tuition: {client['name']}")
+                event.add("summary", " ".join(summary_parts))
                 event.add("dtstamp", datetime.now(timezone.utc))
+                if client.get("location"):
+                    event.add("location", client["location"])
 
                 if time_str:
                     t = datetime.strptime(time_str, "%H:%M").time()

@@ -577,7 +577,11 @@ def _build_calendar_ics() -> bytes:
 def calendar_feed(token: str):
     if not secrets.compare_digest(token, CALENDAR_TOKEN):
         raise HTTPException(status_code=404)
-    return Response(content=_build_calendar_ics(), media_type="text/calendar; charset=utf-8")
+    return Response(
+        content=_build_calendar_ics(),
+        media_type="text/calendar; charset=utf-8",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 # ── Static frontend ────────────────────────────────────────────────────────
